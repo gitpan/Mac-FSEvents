@@ -9,7 +9,7 @@ if ( $Config{myarchname} =~ /i386/ ) {
     }
     else {
         # 5.8.x, build for 10.3+ 32-bit universal
-        $arch = "-arch i386 -arch ppc -isysroot /Developer/SDKs/MacOSX10.4u.sdk -mmacosx-version-min=10.3";
+        $arch = "-arch i386 -arch ppc";
     }
     
     print "Adding $arch\n";

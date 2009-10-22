@@ -5,7 +5,7 @@ use strict;
 
 use Mac::FSEvents::Event;
 
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 
 require XSLoader;
 XSLoader::load('Mac::FSEvents', $VERSION);
