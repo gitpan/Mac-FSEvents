@@ -29,12 +29,19 @@ typedef struct {
     FSEventStreamRef stream;
     CFAbsoluteTime latency;
     FSEventStreamEventId since;
+    FSEventStreamCreateFlags flags;
     int respipe[2]; // pipe for thread to signal Perl for new event
     int reqpipe[2]; // pipe for Perl to signal thread to shutdown
     pthread_t tid;
     pthread_mutex_t mutex;
     struct queue *queue;
+    pid_t original_pid;
 } FSEvents;
+
+struct watch_data {
+    FSEvents *fs_events;
+    pthread_cond_t cond;
+};
 
 void
 _init (FSEvents *self) {
@@ -46,6 +53,7 @@ _init (FSEvents *self) {
     self->reqpipe[1] = -1;
     self->latency    = 2.0;
     self->since      = kFSEventStreamEventIdSinceNow;
+    self->flags      = kFSEventStreamCreateFlagNone;
     
     self->queue       = calloc(1, sizeof(struct queue));
     self->queue->head = NULL;
@@ -140,7 +148,8 @@ streamEvent(
 
 void *
 _watch_thread(void *arg) {
-    FSEvents *self = (FSEvents *)arg;
+    struct watch_data *wd = (struct watch_data *) arg;
+    FSEvents *self        = wd->fs_events;
     
     CFStringRef macpath = CFStringCreateWithCString(
         NULL,
@@ -188,7 +197,7 @@ _watch_thread(void *arg) {
         pathsToWatch,
         self->since,
         self->latency,
-        kFSEventStreamCreateFlagNone
+        self->flags
     );
     
     FSEventStreamScheduleWithRunLoop(
@@ -198,11 +207,23 @@ _watch_thread(void *arg) {
     );
     
     FSEventStreamStart(stream);
+
+    pthread_mutex_lock(&self->mutex);
     
     self->stream = stream;
+
+    pthread_cond_signal(&wd->cond);
+    pthread_mutex_unlock(&self->mutex);
     
     CFRunLoopRun();
 }
+
+int _check_process(FSEvents *self)
+{
+    return self->original_pid == getpid();
+}
+
+#include "const-c.inc"
 
 MODULE = Mac::FSEvents      PACKAGE = Mac::FSEvents
 
@@ -231,7 +252,11 @@ PPCODE:
         self->path = calloc(1, sv_len(*svp) + 1);
         strcpy( self->path, SvPVX(*svp) );
     }
-    
+
+    if ((svp = hv_fetch(args, "flags", 5, FALSE))) {
+        self->flags = (FSEventStreamCreateFlags)SvIV(*svp);
+    }
+
     if ( !self->path ) {
         croak( "Error: path argument to new() must be supplied" );
     }
@@ -249,12 +274,9 @@ CODE:
     if ( !self ) {
         return;
     }
-    
-    if ( !self->tid ) {
-        // Work around a weird bug under Snow Leopard where we get a second
-        // DESTROY on an object that was never created, and has no thread?!
-        return;
-    }        
+
+    /* we don't check if we own anything, because we have to clean up
+     * memory anyway */
     
     if ( self->path ) {
         free( self->path );
@@ -267,12 +289,18 @@ CODE:
     }
 }
 
-FILE *
+void
 watch(FSEvents *self)
-CODE:
+PPCODE:
 {
     int err;
     FILE *fh;
+    struct watch_data wd;
+    GV *glob;
+    PerlIO *fp;
+
+    /* we don't check process ownership here, because we'll be populating
+     * new data structures anyway */
     
     if (self->respipe[0] > 0) {
         fprintf( stderr, "Error: already watching, please call stop() first\n" );
@@ -290,24 +318,48 @@ CODE:
     if ( pthread_mutex_init(&self->mutex, NULL) != 0 ) {
         croak( "Error: unable to initialize mutex" );
     }
+
+    self->original_pid = getpid();
+
+    wd.fs_events = self;
+
+    pthread_cond_init(&wd.cond, NULL);
     
-    err = pthread_create( &self->tid, NULL, _watch_thread, (void *)self );
+    err = pthread_create( &self->tid, NULL, _watch_thread, (void *)&wd );
+
+    pthread_mutex_lock(&self->mutex);
+    while(! self->stream) {
+        pthread_cond_wait(&wd.cond, &self->mutex);
+    }
+    pthread_mutex_unlock(&self->mutex);
+
+    pthread_cond_destroy(&wd.cond);
+
     if (err != 0) {
         croak( "Error: can't create thread: %s\n", err );
     }
     
     fh = fdopen( self->respipe[0], "r" );
     
-    RETVAL = fh;
+    glob = (GV *) SvREFCNT_inc(newGVgen("Mac::FSEvents"));
+    fp   = PerlIO_importFILE(fh, 0);
+    do_open(glob, "+<&", 3, FALSE, 0, 0, fp);
+
+    XPUSHs( sv_2mortal( newRV((SV *) glob) ) );
+    SvREFCNT_dec(glob);
 }
-OUTPUT:
-    RETVAL
 
 void
 stop(FSEvents *self)
 CODE:
 {    
     if ( !self ) {
+        return;
+    }
+
+    /* If we don't own the data, let the parent
+     * clean it up */
+    if ( !_check_process(self) ) {
         return;
     }
     
@@ -328,15 +380,41 @@ read_events(FSEvents *self)
 PPCODE:
 {
     HV *event;
-    char buf [4];
+    char buf;
     struct event *e;
+
+    if ( !_check_process(self) ) {
+        /* If we don't own the data, we die with an error message */
+        croak( "Called Mac::FSEvents::read_events from process other than the originator" );
+    }
     
     if ( self->respipe[0] > 0 ) {
-        // Read dummy bytes
-        // This call will block until an event is ready if we're in polling mode
-        while ( read(self->respipe[0], buf, 4) == 4 );
-        
+        ssize_t bytes;
+        int read_attempts = 0;
+
         pthread_mutex_lock(&self->mutex);
+
+        /* If the queue is not empty, that means there's at least one byte in
+         * our pipe.  We need to clear it so that select() returns an accurate
+         * result. */
+        if(self->queue->head) {
+            bytes = read(self->respipe[0], &buf, 1);
+            if(bytes <= 0) {
+                return;
+            }
+        }
+        /* Otherwise, we need to wait for the helper thread to populate the
+         * queue.  Once it does this, read() will return, so we'll grab the
+         * mutex again and check its success.
+         */
+        while(! self->queue->head) {
+            pthread_mutex_unlock(&self->mutex);
+            bytes = read(self->respipe[0], &buf, 1);
+            if(bytes <= 0) {
+                return;
+            }
+            pthread_mutex_lock(&self->mutex);
+        }
         
         // read queue into hash
         for (e = self->queue->head; e != NULL; e = e->next) {           
@@ -370,6 +448,10 @@ PPCODE:
                 else if ( e->flags & kFSEventStreamEventFlagUnmount ) {
                     hv_store( event, "unmount", 7, newSVuv(1), 0 );
                 }
+
+                if ( e->flags & kFSEventStreamEventFlagRootChanged ) {
+                    hv_store( event, "root_changed", 12, newSVuv(1), 0 );
+                }
             }
             
             XPUSHs( sv_2mortal( sv_bless(
@@ -377,23 +459,21 @@ PPCODE:
                 gv_stashpv("Mac::FSEvents::Event", 1)
             ) ) );
         }
-        
+
+        // free queue
+        e = self->queue->head;
+        while ( e != NULL ) {
+            struct event *const next = e->next;
+            free(e->path);
+            free(e);
+            e = next;
+        }
+
+        self->queue->head = NULL;
+        self->queue->tail = NULL;
+
         pthread_mutex_unlock(&self->mutex);
     }
-    
-    pthread_mutex_lock(&self->mutex);
-    
-    // free queue
-    e = self->queue->head;
-    while ( e != NULL ) {
-        struct event *const next = e->next;
-        free(e->path);
-        free(e);
-        e = next;
-    }
-    
-    self->queue->head = NULL;
-    self->queue->tail = NULL;
-    
-    pthread_mutex_unlock(&self->mutex);
 }
+
+INCLUDE: const-xs.inc
