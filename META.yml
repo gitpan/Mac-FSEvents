@@ -2,6 +2,7 @@
 abstract: 'Monitor a directory structure for changes'
 author:
   - 'Andy Grundman <andy@hybridized.org>'
+  - 'Rob Hoelz `<rob@hoelz.ro>'
 build_requires:
   ExtUtils::MakeMaker: 0
 configure_requires:
@@ -19,4 +20,4 @@ no_index:
     - inc
 requires:
   File::Slurp: 0
-version: 0.07
+version: 0.08
