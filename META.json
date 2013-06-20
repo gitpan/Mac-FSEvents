@@ -4,7 +4,7 @@
       "Andy Grundman <andy@hybridized.org>, Rob Hoelz <rob@hoelz.ro>"
    ],
    "dynamic_config" : 1,
-   "generated_by" : "ExtUtils::MakeMaker version 6.6302, CPAN::Meta::Converter version 2.120630",
+   "generated_by" : "ExtUtils::MakeMaker version 6.68, CPAN::Meta::Converter version 2.112621",
    "license" : [
       "unknown"
    ],
@@ -17,25 +17,28 @@
       "directory" : [
          "t",
          "inc"
+      ],
+      "file" : [
+        "MacVersion.pm"
       ]
    },
    "prereqs" : {
       "build" : {
          "requires" : {
-            "ExtUtils::MakeMaker" : "0"
+            "ExtUtils::MakeMaker" : 0
          }
       },
       "configure" : {
          "requires" : {
-            "ExtUtils::MakeMaker" : "0"
+            "ExtUtils::MakeMaker" : 0
          }
       },
       "runtime" : {
          "requires" : {
-            "File::Slurp" : "0"
+            "File::Slurp" : 0
          }
       }
    },
    "release_status" : "stable",
-   "version" : "0.09"
+   "version" : "0.10"
 }
