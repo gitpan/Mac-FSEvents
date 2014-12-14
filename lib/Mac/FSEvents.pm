@@ -6,7 +6,7 @@ use base 'Exporter';
 
 use Mac::FSEvents::Event;
 
-our $VERSION = '0.11';
+our $VERSION = '0.12';
 
 our @EXPORT_OK   = qw(NONE WATCH_ROOT);
 our %EXPORT_TAGS = ( flags => \@EXPORT_OK );
@@ -37,6 +37,16 @@ foreach my $constant ( @maybe_export_ok ) {
         };
         push @EXPORT_OK, $constant;
     }
+}
+
+sub new {
+    my $self = shift;
+    my $args = shift;
+
+    die "path argument to new() must be supplied" unless $args->{path};
+    die "path argument to new() must be plain string" if ref $args->{path};
+
+    return __PACKAGE__->_new( $args );
 }
 
 sub DESTROY {
